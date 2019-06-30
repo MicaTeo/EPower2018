@@ -1,0 +1,337 @@
+model EPower
+uses "mmxprs"
+
+declarations
+	!NPeriods = 1			!!!!!Model with average maximum wind power output and average demand
+	NPeriods = 6			!!!!!Model with base case
+	!NPeriods = 12			!!!!!Model with DemandMu = 0.9 and WindMu = 1.6
+	
+	Emiss : set of string
+	Source : set of string
+	Times : set of real 
+	
+	PeriodLength: array(Times) of real
+	Demand : array(Times) of real
+	MaxOutput : array(Source) of real
+	RunningCost : array(Source) of real
+	IncreaseCost : array(Source) of real
+	Emissions : array(Emiss,Source) of real
+	EmissionsLimit : array(Emiss) of real
+	
+	MaxHydroReserve : real
+	NaturalHydroInflow : real
+	HydroPowerEfficiencyFrac : real
+	ElectricityPrice : real 
+	
+	DemandMu : real 
+	WindMu: real
+	 
+	OutputOfEachSourcePerPeriod: array(Times,Source) of mpvar
+	DemandForPumpingWaterPerPeriodPerSource : array(Times,Source) of mpvar
+	OutputIncreaseOfEachSourcePerPeriod: array(Times,Source) of mpvar
+	Inventory: array(Times) of mpvar
+end-declarations
+
+initializations from "EPower.dat"
+	Emiss Source Times PeriodLength Demand MaxOutput RunningCost 
+	IncreaseCost Emissions EmissionsLimit MaxHydroReserve NaturalHydroInflow 
+	HydroPowerEfficiencyFrac ElectricityPrice DemandMu WindMu
+end-initializations
+
+forward procedure Report
+
+!Maximum Output Constraint
+		
+		!!!!!Model with reducing the limit of CO2 emission up to 50% and increasing the capacity of the source of interest
+		
+		!MaxOutput("Gas") := MaxOutput("Gas") + 1000
+		
+		!MaxOutput("Coal") := MaxOutput("Coal") +1000
+		
+		!MaxOutput("Nuclear") := MaxOutput("Nuclear") +1000
+		
+		!MaxOutput("Wind") := MaxOutput("Wind") +500
+
+		!MaxOutput("Hydro") := MaxOutput("Hydro") +1000
+		!NaturalHydroInflow := 1.5*NaturalHydroInflow
+		!MaxHydroReserve :=1.5*MaxHydroReserve
+		
+		!MaxOutput("Interconnect") := MaxOutput("Interconnect") +1000
+
+
+forall(t in Times, s in Source) do
+	MaxOutputCS(t,s) := OutputOfEachSourcePerPeriod(t,s) <= MaxOutput(s)
+	if t>= 7 then
+		MaxOutputCS(t,"Wind"):= OutputOfEachSourcePerPeriod(t,"Wind") <= WindMu*MaxOutput("Wind")
+	end-if
+end-do
+
+!Increase in Power Output from one period to another period
+forall(t in Times, s in Source) do
+	if t=1 then
+		OutputIncreaseOfEachSourcePerPeriod(t,s) >= OutputOfEachSourcePerPeriod(t,s) - OutputOfEachSourcePerPeriod(NPeriods,s)
+	else
+		OutputIncreaseOfEachSourcePerPeriod(t,s) >= OutputOfEachSourcePerPeriod(t,s) - OutputOfEachSourcePerPeriod(t-1,s)
+	end-if
+end-do
+
+!Inventory of Pumped-Storage Hydro and its constraint
+forall(t in Times) do
+	DemandForPumpingWaterPerPeriod(t) := sum(s in Source) DemandForPumpingWaterPerPeriodPerSource(t,s)
+	TotalOutputPerPeriod(t) := sum(s in Source) OutputOfEachSourcePerPeriod(t,s) 
+
+	if t =1 then 
+		Inventory(t) = Inventory(NPeriods) + NaturalHydroInflow*PeriodLength(t) + 
+		DemandForPumpingWaterPerPeriod(t)*PeriodLength(t)*HydroPowerEfficiencyFrac -  
+		OutputOfEachSourcePerPeriod(t,"Hydro")*PeriodLength(t) 
+	else
+		Inventory(t) = Inventory(t-1) + NaturalHydroInflow*PeriodLength(t) + 
+		DemandForPumpingWaterPerPeriod(t)*PeriodLength(t)*HydroPowerEfficiencyFrac - 
+		OutputOfEachSourcePerPeriod(t,"Hydro")*PeriodLength(t)
+	end-if
+	
+	InventoryCSU(t) := Inventory(t) <= MaxHydroReserve
+	InventoryCSL(t) := Inventory(t) >= 0
+	
+	EnergyofHydroPerPeriodCS(t) := OutputOfEachSourcePerPeriod(t,"Hydro")*PeriodLength(t) <= Inventory(t)
+end-do
+
+!There is a limit of 2000MW on the power which can be used for pumping
+forall (t in Times) DemandForPumpingWaterPerPeriod(t) + OutputOfEachSourcePerPeriod(t,"Hydro") <= MaxOutput("Hydro")
+
+
+!Demand Constraint
+forall(t in Times) do
+	if t <= 6 then
+		DemandCS(t) := TotalOutputPerPeriod(t) = Demand(t) + DemandForPumpingWaterPerPeriod(t)
+	else
+		DemandCS(t) := TotalOutputPerPeriod(t) = DemandMu*Demand(t) + DemandForPumpingWaterPerPeriod(t)
+	end-if
+end-do
+
+!Emission Constraint
+forall(s in Source) 
+	TotalEnergyOfEachSource(s) := sum(t in Times) OutputOfEachSourcePerPeriod(t,s)*PeriodLength(t)
+
+forall(e in Emiss) do 
+	!!!!!Model with reducing the limit of CO2 emission up to 50%
+	!EmissionsLimit("CO2") := 100000
+	TotalEmissions(e) := sum(s in Source) TotalEnergyOfEachSource(s)*Emissions(e,s)
+	EmissionsCS(e) := TotalEmissions(e) <= EmissionsLimit(e)
+	!!!!!For the model with DemandMu = 0.9 and WindMu = 1.6, need to multiply emission limit by 2 
+	!EmissionsCS(e) := TotalEmissions(e) <= 2*EmissionsLimit(e)
+end-do
+				 		
+!Cost,Income,Profit
+forall(s in Source) TotalRunningCostPerSource(s) := TotalEnergyOfEachSource(s)*RunningCost(s)
+TotalElectricityCost := sum(s in Source) TotalRunningCostPerSource(s) 
+
+forall(t in Times)  CostofIncreaseOutputPerPeriod(t) := sum(s in Source) OutputIncreaseOfEachSourcePerPeriod(t,s)*IncreaseCost(s)
+TotalIncreaseCost :=  sum(t in Times) CostofIncreaseOutputPerPeriod(t)
+
+TotalCost := TotalElectricityCost + TotalIncreaseCost
+Income := sum(s in Source) TotalEnergyOfEachSource(s)*ElectricityPrice - (sum(t in Times) DemandForPumpingWaterPerPeriod(t)*PeriodLength(t)*ElectricityPrice)
+NetProfit := Income - TotalCost
+maximize(NetProfit)
+
+Report
+
+	
+		
+procedure Report
+
+!Report results
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+write("Power Output in Each Period(MW)")
+
+writeln
+write("Period")
+forall(s in Source)write("                  ", strfmt(s, 6), "        ")
+writeln
+forall(t in Times) do
+write(t)
+forall(s in Source) write("                         ",strfmt(getsol(OutputOfEachSourcePerPeriod(t,s)), 7, 2))
+writeln
+end-do
+writeln
+write("Total Power Output(MW)")
+forall(s in Source) write("   ",strfmt(getsol(sum(t in Times)(OutputOfEachSourcePerPeriod(t,s))), 9, 2), "                    ")
+   
+writeln
+writeln
+writeln
+
+writeln("Energy Generated In Each Period(MWh)")
+write("Period")
+forall(s in Source)write("            ", strfmt(s, 8),"         ")
+writeln
+forall(t in Times) do
+write(t)
+forall(s in Source) write("                    ",strfmt(getsol(OutputOfEachSourcePerPeriod(t,s)*PeriodLength(t)), 8, 2))
+writeln
+end-do
+writeln
+write("Total Energy(MWh)")
+forall(s in Source) write("  ",strfmt(getsol(sum(t in Times)(getsol(OutputOfEachSourcePerPeriod(t,s)*PeriodLength(t)))), 10, 2), "                ")
+   
+writeln
+writeln
+
+writeln
+writeln("Pumped-Storage Hydro")
+write("Period")
+write("    Power To Pump Water(MW)","     ","Power To Release Water(MW)")
+writeln
+forall(t in Times) do
+write(t) 
+write("              ", strfmt(getsol(DemandForPumpingWaterPerPeriod(t)),7,2),"                       ",strfmt(getsol(OutputOfEachSourcePerPeriod(t,"Hydro")),7,2))
+writeln
+end-do
+
+writeln
+writeln
+
+writeln("Energy Stored In Reservoir")
+writeln("Period       Energy Stored In Reservoir(MWh)")
+forall(t in Times) writeln("   ",t,"                   ",strfmt(getsol(Inventory(t)),8,2))
+
+
+writeln
+writeln
+
+writeln
+write("Daily Emission")
+writeln 
+write(" Source               ")
+forall(e in Emiss)write( strfmt(e, 7), "(Units)","  ")
+writeln
+forall(s in Source) do
+write( strfmt(s,-12), "            ")
+write( strfmt(getsol(TotalEnergyOfEachSource(s)*Emissions("Sulphur",s)),5),"               ",strfmt(getsol(TotalEnergyOfEachSource(s)*Emissions("CO2",s)),6))
+writeln 
+end-do
+
+writeln
+writeln
+
+writeln("Output Increase of Each Source In Each Period(MW)")
+write("Period","       ")
+forall(s in Source)write(" ", strfmt(s, 6), "             ")
+writeln
+forall(t in Times) do
+write(t)
+forall(s in Source) write("             ",strfmt(getsol(OutputIncreaseOfEachSourcePerPeriod(t,s)), 7, 2))
+writeln
+end-do
+
+
+
+writeln
+writeln
+writeln
+writeln("Total Cost = £  ", strfmt(getsol(TotalCost),2,2))
+writeln("Running Cost = £  ", strfmt(getsol(TotalElectricityCost),2,2))
+writeln("Increase Cost = £  ", strfmt(getsol(TotalIncreaseCost),2,2))
+writeln("Total Income = £  ", strfmt(getsol(Income),2,2))
+writeln("Net Profit = £ ", strfmt(getsol(NetProfit),2,2))
+
+
+
+
+
+writeln
+writeln
+forall(e in Emiss) do
+	write(" ", strfmt(e, 8),", Total emission = " ,strfmt(getsol(TotalEmissions(e)), 8, 0))
+	Slack := getslack(EmissionsCS(e))
+	if (Slack = 0) then
+		LoRg := getsensrng(XPRS_DN, EmissionsCS(e))
+		UpRg := getsensrng(XPRS_UP, EmissionsCS(e))
+		writeln("; emission limit reached; marginal value of emission is £", strfmt(getdual(EmissionsCS(e)), 7, 2),
+				"/Unit for availability in [", strfmt(LoRg, 5), ", ",  strfmt(UpRg, 5), "]")
+	else
+		writeln(" Not at bound")
+	end-if
+end-do
+writeln
+
+
+end-procedure
+
+
+
+!Write in Excel
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+fopen("EPower.csv", F_OUTPUT)
+writeln("Power Output In Each Period(MW)")
+    forall(t in Times) write(",",t)
+    writeln
+    forall(s in Source) do
+        write(s,",")
+        forall(t in Times) do
+            write(getsol(OutputOfEachSourcePerPeriod(t,s)),",")
+        end-do
+        writeln
+    end-do
+    writeln
+    writeln
+    writeln("Period",",","Power To Pump Water(MW)",",","Power To Release Water(MW)")
+    forall(t in Times) do
+        write(t,",",getsol(DemandForPumpingWaterPerPeriod(t)),",",getsol(OutputOfEachSourcePerPeriod(t,"Hydro")))
+        writeln
+    end-do
+    writeln
+    writeln
+    writeln("Period",",","Energy Stored In Reservoir(MWh)")
+    forall(t in Times) do
+        writeln(t,",",getsol(Inventory(t)))
+    end-do
+    writeln
+    writeln
+    writeln("Output Increase Of Each Source In Each Period (MW)")
+      forall(t in Times) write(",",t)
+    writeln
+    forall(s in Source) do
+        write(s,",")
+        forall(t in Times) do
+            write(getsol(OutputIncreaseOfEachSourcePerPeriod(t,s)),",")
+        end-do
+        writeln
+    end-do
+
+
+!!Changes in generation policy and cost if the emissions limit of CO2 
+!!are multiplied by a factor which is reduced from 1.0 to 0.0 in steps of 0.1.
+writeln
+write("Mu,1-Mu,Obj")
+forall(s in Source) write(",", strfmt(s, 7))
+forall(e in Emiss) write(",", strfmt(e, 8))
+writeln
+
+
+Mu := 1.0
+ToMu := 0.0
+
+repeat
+
+forall(e in Emiss) 
+	EmissionsCS(e):=TotalEmissions(e)<=Mu*EmissionsLimit(e)
+
+maximize(NetProfit)
+write(Mu)
+write(",", 1.0-Mu)
+write(",", getsol(NetProfit))
+forall(s in Source) write(",", getsol(sum(t in Times)(getsol(OutputOfEachSourcePerPeriod(t,s)*PeriodLength(t)))))
+forall(e in Emiss) write(",", getsol(TotalEmissions(e)))
+writeln
+	
+Mu := Mu - 0.1
+until Mu < ToMu   
+
+    
+    
+fclose(F_OUTPUT)
+
+
+end-model
